@@ -12,13 +12,16 @@ var_cpu="${var_cpu:-2}"
 var_ram="${var_ram:-2048}"
 var_disk="${var_disk:-10}"
 var_os="${var_os:-debian}"
-var_version="${var_version:-13}"          # Debian 13 includes PHP 8.4 in Debian repos
+var_version="${var_version:-12}"          # Debian 12 (Bookworm) is stable
 var_unprivileged="${var_unprivileged:-1}"
+
+# PHP version (configurable)
+PHP_VERSION="${PHP_VERSION:-8.3}"
 
 # Internal install paths
 APP_DIR="/opt/runescape-api-symfony"
 NGINX_SITE="/etc/nginx/sites-available/runescape-api-symfony"
-PHP_FPM_SOCK="/run/php/php8.4-fpm.sock"
+PHP_FPM_SOCK="/run/php/php${PHP_VERSION}-fpm.sock"
 
 header_info "$APP_DISPLAY"
 variables
@@ -37,15 +40,22 @@ function install_app() {
   apt-get upgrade -y
   msg_ok "Updated OS packages"
 
+  msg_info "Adding Sury PHP repository"
+  apt-get install -y ca-certificates curl gnupg lsb-release
+  curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg
+  echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php-sury.list
+  apt-get update -y
+  msg_ok "Added Sury PHP repository"
+
   msg_info "Installing dependencies"
   apt-get install -y \
     ca-certificates curl git unzip gnupg \
     nginx \
     postgresql postgresql-contrib \
-    php8.4-fpm php8.4-cli php8.4-common \
-    php8.4-curl php8.4-ftp php8.4-intl php8.4-openssl \
-    php8.4-pgsql php8.4-mbstring php8.4-xml php8.4-zip \
-    php8.4-gd php8.4-bcmath \
+    php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-common \
+    php${PHP_VERSION}-curl php${PHP_VERSION}-ftp php${PHP_VERSION}-intl \
+    php${PHP_VERSION}-pgsql php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip \
+    php${PHP_VERSION}-gd php${PHP_VERSION}-bcmath \
     nodejs npm
   msg_ok "Installed dependencies"
 
@@ -128,7 +138,7 @@ EOF
   msg_info "Configuring Nginx"
   rm -f /etc/nginx/sites-enabled/default || true
 
-  cat > "${NGINX_SITE}" <<EOF
+  cat > "${NGINX_SITE}" <<'EOF_NGINX'
 server {
   listen 80;
   server_name _;
@@ -139,7 +149,7 @@ server {
   client_max_body_size 20M;
 
   location / {
-    try_files \$uri /index.php\$is_args\$args;
+    try_files $uri /index.php$is_args$args;
   }
 
   location ~ \.php$ {
@@ -151,15 +161,19 @@ server {
     expires 7d;
     access_log off;
     add_header Cache-Control "public";
-    try_files \$uri /index.php\$is_args\$args;
+    try_files $uri /index.php$is_args$args;
   }
 }
-EOF
+EOF_NGINX
+  
+  # Replace variables in nginx config
+  sed -i "s|\${APP_DIR}|${APP_DIR}|g" "${NGINX_SITE}"
+  sed -i "s|\${PHP_FPM_SOCK}|${PHP_FPM_SOCK}|g" "${NGINX_SITE}"
 
   ln -sf "${NGINX_SITE}" /etc/nginx/sites-enabled/runescape-api-symfony
 
   nginx -t || { msg_error "Nginx configuration test failed"; exit 1; }
-  systemctl enable --now php8.4-fpm
+  systemctl enable --now php${PHP_VERSION}-fpm
   systemctl restart nginx
   msg_ok "Nginx configured and restarted"
 
