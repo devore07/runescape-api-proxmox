@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 source <(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/build.func)
 
+# =============================================================================
+# RuneScape API Symfony - Proxmox LXC Installation Script
+# =============================================================================
+# 
+# Prerequisites (as per application requirements):
+#   - PHP 8.3
+#   - Composer
+#   - Symfony CLI
+#   - Git
+#   - npm
+#   - PostgreSQL
+#
+# Configuration via environment variables:
+#   ROOT_PASSWORD=yourpass    - Set LXC root password (default: "runescape")
+#   PHP_VERSION=8.3           - Set PHP version (default: 8.3)
+#   INSTALL_DOCKER=yes        - Install Docker (default: no, usually not needed in LXC)
+#
+# Example: 
+#   export ROOT_PASSWORD="mypass" && bash runescape-api.sh
+# =============================================================================
+
 # App metadata
 APP="runescape-api-symfony"
 APP_DISPLAY="RuneMetrics (runescape-api-symfony)"
@@ -15,11 +36,14 @@ var_os="${var_os:-debian}"
 var_version="${var_version:-12}"          # Debian 12 (Bookworm) is stable
 var_unprivileged="${var_unprivileged:-1}"
 
-# PHP version (configurable)
+# PHP version (required: 8.3)
 PHP_VERSION="${PHP_VERSION:-8.3}"
 
 # Root password (configurable, default is "runescape")
 ROOT_PASSWORD="${ROOT_PASSWORD:-runescape}"
+
+# Docker installation (optional, usually not needed in LXC)
+INSTALL_DOCKER="${INSTALL_DOCKER:-no}"
 
 # Internal install paths
 APP_DIR="/opt/runescape-api-symfony"
@@ -43,75 +67,53 @@ function install_app() {
   apt-get upgrade -y
   msg_ok "Updated OS packages"
 
-  msg_info "Setting up PHP repository"
+  msg_info "Setting up PHP ${PHP_VERSION}"
   
-  msg_info "Installing repository prerequisites"
-  apt-get install -y ca-certificates curl wget gnupg lsb-release || { msg_error "Failed to install repository prerequisites"; exit 1; }
-  msg_ok "Repository prerequisites installed"
+  msg_info "Installing basic prerequisites"
+  apt-get install -y ca-certificates apt-transport-https curl wget gnupg lsb-release || { msg_error "Failed to install prerequisites"; exit 1; }
+  msg_ok "Prerequisites installed"
   
   DEBIAN_VERSION=$(lsb_release -sc)
   echo "Detected Debian version: ${DEBIAN_VERSION}"
   
-  # Check network connectivity
-  msg_info "Testing network connectivity"
-  echo "Checking DNS resolution..."
-  if host packages.sury.org >/dev/null 2>&1; then
-    echo "✓ DNS resolution OK"
-    SURY_IP=$(host packages.sury.org | grep "has address" | head -1 | awk '{print $4}')
-    echo "  packages.sury.org resolves to: ${SURY_IP}"
-  else
-    echo "⚠ Warning: DNS resolution failed for packages.sury.org"
-  fi
-  
-  echo "Testing connectivity (ping)..."
-  if ping -c 2 -W 5 packages.sury.org >/dev/null 2>&1; then
-    echo "✓ Can reach packages.sury.org via ICMP"
-  else
-    echo "⚠ Warning: Cannot ping packages.sury.org (ICMP may be blocked)"
-  fi
-  msg_ok "Network diagnostic complete"
-  
-  # Try to add Sury repository for newer PHP versions
-  msg_info "Attempting to download Sury PHP GPG key (timeout: 30s)"
-  echo "URL: https://packages.sury.org/php/apt.gpg"
-  echo "Trying curl with verbose output..."
-  
-  if curl -fsSL -v --max-time 30 --retry 2 --connect-timeout 10 https://packages.sury.org/php/apt.gpg 2>&1 | tee /tmp/curl_output.log | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg; then
-    msg_ok "Sury PHP GPG key downloaded via curl"
+  # PHP 8.3+ requires Sury repository (not in Debian default repos)
+  if [[ "${PHP_VERSION}" != "8.2" ]]; then
+    msg_info "PHP ${PHP_VERSION} requires Sury repository, adding it now..."
     
-    msg_info "Adding Sury PHP repository to sources"
-    echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
-    msg_ok "Sury PHP repository added"
+    # Try multiple methods with timeout to avoid hanging
+    SURY_SUCCESS=false
     
-    msg_info "Updating package lists (with Sury repository)"
-    apt-get update -y || { msg_error "Failed to update package lists with Sury repository"; exit 1; }
-    msg_ok "Package lists updated with Sury PHP repository"
-  else
-    echo "curl failed, checking output:"
-    cat /tmp/curl_output.log
-    
-    msg_info "Trying wget as fallback..."
-    if wget --timeout=30 --tries=2 -O /tmp/php-sury.gpg https://packages.sury.org/php/apt.gpg 2>&1 && \
-       gpg --dearmor < /tmp/php-sury.gpg > /usr/share/keyrings/php-sury.gpg; then
-      msg_ok "Sury PHP GPG key downloaded via wget"
-      
-      msg_info "Adding Sury PHP repository to sources"
-      echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
-      msg_ok "Sury PHP repository added"
-      
-      msg_info "Updating package lists (with Sury repository)"
-      apt-get update -y
-      msg_ok "Package lists updated with Sury PHP repository"
+    # Method 1: Direct curl with timeout
+    msg_info "Attempting download with curl (45s timeout)..."
+    if timeout 45 bash -c 'curl -fsSL https://packages.sury.org/php/apt.gpg 2>/dev/null | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg' 2>&1; then
+      SURY_SUCCESS=true
+      msg_ok "Downloaded via curl"
     else
-      msg_info "Could not reach Sury repository, falling back to Debian default PHP"
-      # Use Debian's default PHP (8.2 for Bookworm)
+      msg_info "Curl failed or timed out, trying wget..."
+      
+      # Method 2: wget with timeout
+      if timeout 45 wget -q --timeout=30 -O /tmp/php-sury.gpg https://packages.sury.org/php/apt.gpg 2>&1 && \
+         gpg --dearmor < /tmp/php-sury.gpg > /usr/share/keyrings/php-sury.gpg 2>&1; then
+        SURY_SUCCESS=true
+        msg_ok "Downloaded via wget"
+        rm -f /tmp/php-sury.gpg
+      fi
+    fi
+    
+    if [[ "$SURY_SUCCESS" == "true" ]]; then
+      echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
+      msg_info "Updating package lists with Sury repository..."
+      apt-get update -y || { msg_error "Failed to update with Sury repository"; exit 1; }
+      msg_ok "Sury PHP ${PHP_VERSION} repository configured"
+    else
+      msg_error "Failed to add Sury repository (network timeout). PHP ${PHP_VERSION} is not available in Debian default repos."
+      msg_info "Falling back to Debian default PHP 8.2"
       PHP_VERSION="8.2"
       PHP_FPM_SOCK="/run/php/php${PHP_VERSION}-fpm.sock"
-      msg_ok "Will use Debian default PHP ${PHP_VERSION}"
     fi
+  else
+    msg_info "PHP ${PHP_VERSION} available in Debian default repositories"
   fi
-  
-  rm -f /tmp/curl_output.log /tmp/php-sury.gpg
 
   msg_info "Installing dependencies (PHP ${PHP_VERSION})"
   echo "Installing packages..."
@@ -131,7 +133,30 @@ function install_app() {
   php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" || { msg_error "Failed to download Composer installer"; exit 1; }
   php composer-setup.php --install-dir=/usr/local/bin --filename=composer || { msg_error "Failed to install Composer"; exit 1; }
   rm -f composer-setup.php
+  composer --version
   msg_ok "Installed Composer"
+
+  # Symfony CLI (official installer)
+  msg_info "Installing Symfony CLI"
+  curl -fsSL --max-time 60 https://get.symfony.com/cli/installer | bash || { msg_error "Failed to install Symfony CLI"; exit 1; }
+  mv /root/.symfony5/bin/symfony /usr/local/bin/symfony || mv /root/.symfony/bin/symfony /usr/local/bin/symfony
+  chmod +x /usr/local/bin/symfony
+  symfony --version
+  msg_ok "Installed Symfony CLI"
+
+  # Docker (optional - usually not needed in LXC deployments)
+  if [[ "${INSTALL_DOCKER}" == "yes" ]]; then
+    msg_info "Installing Docker (INSTALL_DOCKER=yes)"
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+    sh /tmp/get-docker.sh
+    rm -f /tmp/get-docker.sh
+    systemctl enable docker
+    systemctl start docker
+    docker --version
+    msg_ok "Installed Docker"
+  else
+    msg_info "Skipping Docker installation (set INSTALL_DOCKER=yes if needed)"
+  fi
 
   msg_info "Preparing PostgreSQL database"
   DB_NAME="app"
@@ -281,6 +306,15 @@ Database: ${DB_NAME}
 User: ${DB_USER}
 Password: ${DB_PASS}
 DSN: postgresql://${DB_USER}:********@127.0.0.1:5432/${DB_NAME}?serverVersion=${PG_VERSION}&charset=utf8
+
+=== Installed Prerequisites ===
+PHP: $(php --version | head -1)
+Composer: $(composer --version 2>/dev/null || echo "N/A")
+Symfony CLI: $(symfony --version 2>/dev/null || echo "N/A")
+Git: $(git --version)
+npm: $(npm --version)
+PostgreSQL: $(psql --version)
+Docker: $(docker --version 2>/dev/null || echo "Not installed")
 EOF
   chmod 600 /root/"${APP}_credentials.txt"
 }
@@ -293,7 +327,22 @@ msg_info "Installing ${APP_DISPLAY}"
 install_app
 msg_ok "Installed ${APP_DISPLAY}"
 
-echo -e "\n${INFO}${YW}Web Access:${CL} http://${IP}/"
+echo -e "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "${INFO}${GN}Installation Complete!${CL}"
+echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo -e "${INFO}${YW}Web Access:${CL} http://${IP}/"
 echo -e "${INFO}${YW}Root Password:${CL} ${ROOT_PASSWORD}"
-echo -e "${INFO}${YW}All Credentials:${CL} /root/${APP}_credentials.txt"
-echo -e "${INFO}${YW}Optional scheduler consumer:${CL} systemctl enable --now symfony-scheduler-consumer\n"
+echo -e "${INFO}${YW}Credentials File:${CL} /root/${APP}_credentials.txt"
+echo -e "${INFO}${YW}Optional Service:${CL} systemctl enable --now symfony-scheduler-consumer"
+echo -e "\n${INFO}${CY}Installed Prerequisites:${CL}"
+echo -e "  • PHP: $(php --version | head -1 | awk '{print $2}')"
+echo -e "  • Composer: $(composer --version 2>/dev/null | awk '{print $3}')"
+echo -e "  • Symfony CLI: $(symfony version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+' || echo 'installed')"
+echo -e "  • Git: $(git --version | awk '{print $3}')"
+echo -e "  • npm: $(npm --version)"
+echo -e "  • Node.js: $(node --version)"
+echo -e "  • PostgreSQL: $(psql --version | awk '{print $3}')"
+if [[ "${INSTALL_DOCKER}" == "yes" ]]; then
+  echo -e "  • Docker: $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',')"
+fi
+echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
