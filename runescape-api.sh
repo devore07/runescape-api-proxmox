@@ -43,37 +43,88 @@ function install_app() {
   apt-get upgrade -y
   msg_ok "Updated OS packages"
 
-  msg_info "Adding Sury PHP repository"
+  msg_info "Setting up PHP repository"
   
   msg_info "Installing repository prerequisites"
-  apt-get install -y ca-certificates curl gnupg lsb-release || { msg_error "Failed to install repository prerequisites"; exit 1; }
+  apt-get install -y ca-certificates curl wget gnupg lsb-release || { msg_error "Failed to install repository prerequisites"; exit 1; }
   msg_ok "Repository prerequisites installed"
   
-  msg_info "Downloading Sury PHP GPG key"
-  curl -fsSL --max-time 30 --retry 3 https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg || { msg_error "Failed to download Sury GPG key"; exit 1; }
-  msg_ok "Sury PHP GPG key downloaded"
-  
-  msg_info "Adding Sury PHP repository to sources"
   DEBIAN_VERSION=$(lsb_release -sc)
   echo "Detected Debian version: ${DEBIAN_VERSION}"
-  echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
-  msg_ok "Sury PHP repository added"
   
-  msg_info "Updating package lists (with Sury repository)"
-  apt-get update -y || { msg_error "Failed to update package lists with Sury repository"; exit 1; }
-  msg_ok "Package lists updated with Sury PHP repository"
+  # Check network connectivity
+  msg_info "Testing network connectivity"
+  echo "Checking DNS resolution..."
+  if host packages.sury.org >/dev/null 2>&1; then
+    echo "✓ DNS resolution OK"
+    SURY_IP=$(host packages.sury.org | grep "has address" | head -1 | awk '{print $4}')
+    echo "  packages.sury.org resolves to: ${SURY_IP}"
+  else
+    echo "⚠ Warning: DNS resolution failed for packages.sury.org"
+  fi
+  
+  echo "Testing connectivity (ping)..."
+  if ping -c 2 -W 5 packages.sury.org >/dev/null 2>&1; then
+    echo "✓ Can reach packages.sury.org via ICMP"
+  else
+    echo "⚠ Warning: Cannot ping packages.sury.org (ICMP may be blocked)"
+  fi
+  msg_ok "Network diagnostic complete"
+  
+  # Try to add Sury repository for newer PHP versions
+  msg_info "Attempting to download Sury PHP GPG key (timeout: 30s)"
+  echo "URL: https://packages.sury.org/php/apt.gpg"
+  echo "Trying curl with verbose output..."
+  
+  if curl -fsSL -v --max-time 30 --retry 2 --connect-timeout 10 https://packages.sury.org/php/apt.gpg 2>&1 | tee /tmp/curl_output.log | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg; then
+    msg_ok "Sury PHP GPG key downloaded via curl"
+    
+    msg_info "Adding Sury PHP repository to sources"
+    echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
+    msg_ok "Sury PHP repository added"
+    
+    msg_info "Updating package lists (with Sury repository)"
+    apt-get update -y || { msg_error "Failed to update package lists with Sury repository"; exit 1; }
+    msg_ok "Package lists updated with Sury PHP repository"
+  else
+    echo "curl failed, checking output:"
+    cat /tmp/curl_output.log
+    
+    msg_info "Trying wget as fallback..."
+    if wget --timeout=30 --tries=2 -O /tmp/php-sury.gpg https://packages.sury.org/php/apt.gpg 2>&1 && \
+       gpg --dearmor < /tmp/php-sury.gpg > /usr/share/keyrings/php-sury.gpg; then
+      msg_ok "Sury PHP GPG key downloaded via wget"
+      
+      msg_info "Adding Sury PHP repository to sources"
+      echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
+      msg_ok "Sury PHP repository added"
+      
+      msg_info "Updating package lists (with Sury repository)"
+      apt-get update -y
+      msg_ok "Package lists updated with Sury PHP repository"
+    else
+      msg_info "Could not reach Sury repository, falling back to Debian default PHP"
+      # Use Debian's default PHP (8.2 for Bookworm)
+      PHP_VERSION="8.2"
+      PHP_FPM_SOCK="/run/php/php${PHP_VERSION}-fpm.sock"
+      msg_ok "Will use Debian default PHP ${PHP_VERSION}"
+    fi
+  fi
+  
+  rm -f /tmp/curl_output.log /tmp/php-sury.gpg
 
-  msg_info "Installing dependencies"
+  msg_info "Installing dependencies (PHP ${PHP_VERSION})"
+  echo "Installing packages..."
   apt-get install -y \
     ca-certificates curl git unzip gnupg \
     nginx \
     postgresql postgresql-contrib \
     php${PHP_VERSION}-fpm php${PHP_VERSION}-cli php${PHP_VERSION}-common \
-    php${PHP_VERSION}-curl php${PHP_VERSION}-ftp php${PHP_VERSION}-intl \
+    php${PHP_VERSION}-curl php${PHP_VERSION}-intl \
     php${PHP_VERSION}-pgsql php${PHP_VERSION}-mbstring php${PHP_VERSION}-xml php${PHP_VERSION}-zip \
     php${PHP_VERSION}-gd php${PHP_VERSION}-bcmath \
-    nodejs npm
-  msg_ok "Installed dependencies"
+    nodejs npm || { msg_error "Failed to install dependencies"; exit 1; }
+  msg_ok "Installed dependencies (PHP ${PHP_VERSION})"
 
   # Composer (official installer)
   msg_info "Installing Composer"
