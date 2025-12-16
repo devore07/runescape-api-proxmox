@@ -71,13 +71,13 @@ function install_app() {
   DB_USER="app"
   DB_PASS="$(openssl rand -base64 24 | tr -d '=+/ ' | head -c 24)"
   # Detect PostgreSQL version
-  PG_VERSION=$(sudo -u postgres psql -tAc "SELECT version();" | grep -oP 'PostgreSQL \K[0-9]+' || echo "15")
+  PG_VERSION=$(su - postgres -c "psql -tAc \"SELECT version();\"" | grep -oP 'PostgreSQL \K[0-9]+' || echo "15")
 
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';"
+  su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" | grep -q 1 || \
+    su - postgres -c "psql -c \"CREATE USER ${DB_USER} WITH PASSWORD '${DB_PASS}';\""
 
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+  su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" | grep -q 1 || \
+    su - postgres -c "psql -c \"CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};\""
 
   msg_ok "PostgreSQL database ready"
 
