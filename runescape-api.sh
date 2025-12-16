@@ -18,6 +18,9 @@ var_unprivileged="${var_unprivileged:-1}"
 # PHP version (configurable)
 PHP_VERSION="${PHP_VERSION:-8.3}"
 
+# Root password (configurable, default is "runescape")
+ROOT_PASSWORD="${ROOT_PASSWORD:-runescape}"
+
 # Internal install paths
 APP_DIR="/opt/runescape-api-symfony"
 NGINX_SITE="/etc/nginx/sites-available/runescape-api-symfony"
@@ -41,11 +44,24 @@ function install_app() {
   msg_ok "Updated OS packages"
 
   msg_info "Adding Sury PHP repository"
-  apt-get install -y ca-certificates curl gnupg lsb-release
-  curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg
-  echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php-sury.list
-  apt-get update -y
-  msg_ok "Added Sury PHP repository"
+  
+  msg_info "Installing repository prerequisites"
+  apt-get install -y ca-certificates curl gnupg lsb-release || { msg_error "Failed to install repository prerequisites"; exit 1; }
+  msg_ok "Repository prerequisites installed"
+  
+  msg_info "Downloading Sury PHP GPG key"
+  curl -fsSL --max-time 30 --retry 3 https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-sury.gpg || { msg_error "Failed to download Sury GPG key"; exit 1; }
+  msg_ok "Sury PHP GPG key downloaded"
+  
+  msg_info "Adding Sury PHP repository to sources"
+  DEBIAN_VERSION=$(lsb_release -sc)
+  echo "Detected Debian version: ${DEBIAN_VERSION}"
+  echo "deb [signed-by=/usr/share/keyrings/php-sury.gpg] https://packages.sury.org/php/ ${DEBIAN_VERSION} main" > /etc/apt/sources.list.d/php-sury.list
+  msg_ok "Sury PHP repository added"
+  
+  msg_info "Updating package lists (with Sury repository)"
+  apt-get update -y || { msg_error "Failed to update package lists with Sury repository"; exit 1; }
+  msg_ok "Package lists updated with Sury PHP repository"
 
   msg_info "Installing dependencies"
   apt-get install -y \
@@ -199,14 +215,23 @@ EOF
   systemctl daemon-reload
   msg_ok "Optional service created (enable with: systemctl enable --now symfony-scheduler-consumer)"
   
+  msg_info "Setting root password"
+  echo "root:${ROOT_PASSWORD}" | chpasswd
+  msg_ok "Root password set"
+  
   # Store credentials in root-only file for convenience
-  cat > /root/"${APP}_db_credentials.txt" <<EOF
+  cat > /root/"${APP}_credentials.txt" <<EOF
+=== LXC Root Access ===
+Username: root
+Password: ${ROOT_PASSWORD}
+
+=== Database Credentials ===
 Database: ${DB_NAME}
 User: ${DB_USER}
 Password: ${DB_PASS}
 DSN: postgresql://${DB_USER}:********@127.0.0.1:5432/${DB_NAME}?serverVersion=${PG_VERSION}&charset=utf8
 EOF
-  chmod 600 /root/"${APP}_db_credentials.txt"
+  chmod 600 /root/"${APP}_credentials.txt"
 }
 
 start
@@ -217,6 +242,7 @@ msg_info "Installing ${APP_DISPLAY}"
 install_app
 msg_ok "Installed ${APP_DISPLAY}"
 
-echo -e "\n${INFO}${YW}Access:${CL} http://${IP}/"
-echo -e "${INFO}${YW}DB credentials:${CL} /root/${APP}_db_credentials.txt"
+echo -e "\n${INFO}${YW}Web Access:${CL} http://${IP}/"
+echo -e "${INFO}${YW}Root Password:${CL} ${ROOT_PASSWORD}"
+echo -e "${INFO}${YW}All Credentials:${CL} /root/${APP}_credentials.txt"
 echo -e "${INFO}${YW}Optional scheduler consumer:${CL} systemctl enable --now symfony-scheduler-consumer\n"
